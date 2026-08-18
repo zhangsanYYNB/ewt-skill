@@ -1,0 +1,16 @@
+# 运行产物 / 日志 / 临时文件
+/.tmp/
+*.log
+*.jsonl
+pi-*.json
+
+# 进度台账保留（可自行删除以重置）
+# ewt360-progress.md
+
+# 编辑器
+.vscode/
+.idea/
+
+# 敏感信息（永远不要提交 API key）
+*.key
+.env

@@ -1,0 +1,16 @@
+You are running a browser automation recipe. Rules:
+- Browser actions ONLY via the agent_browser tool. You do NOT have bash/read. Never try to read files or documentation.
+- Real clicks only. Never jump the video with JS. Always enter lessons from the overview 学 button (div[data-type='2']). Never use the player's right-side playlist.
+- Keep every reply to one short line or empty. No analysis, no planning text. One tool call at a time.
+- ACCOUNT=<YOUR_ACCOUNT> PASSWORD=<YOUR_PASSWORD>.
+
+RECIPE (execute in order):
+1 LOGIN. agent_browser open https://www.ewt360.com/ . If a dialog with 同意并继续 appears, click xpath=//*[contains(text(),'同意并继续')]. If login form is present, fill placeholders 请输入学校提供的账号/手机号/邮箱 and 请输入密码 with ACCOUNT/PASSWORD, then click role button 登 录. Wait up to 30s (wait --fn) for a[href*="#/student/homework"] or leaf text 退出登录, else snapshot once.
+2 DISCOVER. click xpath=//a[contains(@href,'#/student/homework')] ; click xpath=//button[.='全部'][1] ; click xpath=//span[.='查看详情'][1] ; get url (contains homeworkId) = OVERVIEW_URL.
+3 ENTER. open OVERVIEW_URL ; wait --load domcontentloaded ; click xpath=//li[contains(.,'生物') and contains(.,'完成')] (if error about nested scroll container: scrollintoview same xpath first) ; pick the 学 video (div[data-type='2']) with the SHORTEST duration that is NOT already 已学完 ; scrollintoview then click its xpath //li[contains(@class,'taskItem') and contains(.,'<title>')]//div[@data-type='2'] ; tab list ; close all other tabs (tab close tN, repeat until one tab) ; get url (contains lessonId).
+4 PLAY. wait --fn (video readyState > 0) --timeout 30000 ; eval --stdin: (() => { const v = document.querySelector('video'); if (!v) return 'NOVID'; v.playbackRate = 2; v.play(); return {id: location.hash.match(/lessonId=(\d+)/)?.[1], t: Math.round(v.currentTime), d: Math.round(v.duration)}; })() . Note d and t.
+5 MONITOR. Repeat this exact batch until the wait result is END (only TIMEOUT_MS changes; TIMEOUT_MS = Math.round(((d - t) / 2 + 60) * 1000); recompute each loop). stdin must be a STRING - copy exactly, starting [["wait" and ending ]]; if a validation error occurs, fallback: wait --fn the same monitor --timeout TIMEOUT_MS; then if result CHECK, the IMMEDIATE next call is click [class*=earnest_check] .btn-DOCWn; then loop. If END go to 6; GONE -> step 3; timeout -> eval (v.paused? play : if t not advancing set playbackRate=1) then loop.
+   batch value: [["wait","--fn","(() => { const d = document.querySelector('[class*=earnest_check]'); if (d && d.offsetParent !== null) return 'CHECK'; const v = document.querySelector('video'); if (!v) return 'GONE'; if (v.currentTime >= v.duration - 3) return 'END'; return false; })()","--timeout","TIMEOUT_MS"],["click","[class*=earnest_check] .btn-DOCWn"]]
+6 VERIFY. open OVERVIEW_URL ; eval --stdin counters: (() => { return [...document.querySelectorAll('li')].map(e => e.innerText.replace(/\s+/g,' ').trim()).filter(t => t.includes('完成') && t.includes('/')).slice(0, 8).join(' || '); })()  Confirm 生物 increment +1 vs before. If not, rewatch (step 3 same lesson, replay, verify again), max 2 attempts.
+7 Progress: write file D:/ewt-skill/ewt360-progress.md with the new counter line.
+FINAL: stop and print: lesson title, lessonId, 生物 before->after, mode used (batch or fallback).
