@@ -1,296 +1,392 @@
 ---
 name: ewt360-lessons
-description: Automate 升学e网通 (ewt360.com) holiday-task VIDEO lessons. For any student account, opens the browser, logs in, finds the current task, and plays every unfinished 学 (video) lesson at 2x speed to completion so the task counter increments +1, auto-dismissing the random "seriousness check" popups and re-watching whenever a check is missed. Selectors and the whole state machine are hardcoded and were verified on a live account on 2026-08; this is a strict, long-running, low-context-friendly recipe. Use for "keep watching videos on ewt360", "finish the summer task videos", or similar.
+description: Automate 升学e网通 (ewt360.com) holiday-task VIDEO lessons with a fixed low-model-friendly state machine. Handles mandatory privacy consent before login, exhaustively clicks 点击加载更多 before selecting lessons, robustly removes stale tabs despite tab-close false-negative errors, plays at 2x while passing seriousness checks, verifies live counters, and never uses a shared progress file. Use for watching or testing EWT360 holiday-task 学 videos, including sequential multi-account runs.
 ---
 
-# EWT360 Holiday Task — Video Automation (升学e网通 看课)
+# EWT360 Holiday Task — Video Automation
 
-Play every unfinished **video lessons (学)** of a student's current holiday task to the end at **2x speed** so the server records each one as done (task counter `X/Y` becomes `X+1/Y`). Works for **any account**; nothing about the task, subject list, or homework number is hardcoded — everything is discovered from the live page each run.
+Use only the native **`agent_browser`** tool for the website. The commands and selectors below are intentionally fixed for weak models.
 
-All browser work goes through the **`agent_browser` tool** (native, not bash). Every command is an exact `args` array, and any JavaScript goes in the tool's `stdin` field. There is **no PowerShell quoting involved** (see "Windows / PowerShell notes").
+## 0. Hard rules
+
+1. **Never read or write `ewt360-progress.md` or any other progress ledger.** Do not use `read`, `write`, or shell commands for run state. The live page is the only source of truth.
+2. At every account boundary, discard the previous account's `OVERVIEW_URL`, homeworkId, counters, lesson title, and lessonId. Log in again and rediscover all values. Never reuse one account's values for another.
+3. **Before clicking 登录, check the privacy-agreement checkbox.** The current control is `.privacy__agreement input[type='checkbox']`. Do not confuse it with `下次自动登录`.
+4. **Do not select a lesson until the subject list says `没有更多必学任务了`.** `点击加载更多` is mandatory, not optional. Repeat it until the terminal text is observed.
+5. **Keep one tab.** `tab close <id>` can close a tab successfully but still return `Tab <id> not found`. Therefore the close command's success/error is not authoritative; the following `tab list` is authoritative. Never put tab cleanup in a fail-fast batch.
+6. Enter every lesson from the overview row's `学` button, `div[data-type='2']`. Never switch through the player page's right-side playlist; that can break counting.
+7. Never seek/jump `currentTime`, never invoke DOM `.click()` from JavaScript, and never script a seriousness-check click. Real browser `click`/`check` commands are mandatory. JavaScript is allowed only for read-only state extraction and for setting the normal player rate/play state.
+8. A lesson is complete only when the live subject counter increments by exactly 1. If it does not, rewatch the same lesson; never silently skip it.
+9. Run state-changing steps serially. Do not use `multi_tool_use.parallel` for browser actions.
+10. A raw `batch` is a fixed sequential command list. **It cannot inspect an earlier result and conditionally choose a different later command.** `--bail` can only stop after a failure. The model must read the returned `details.batchSteps` and branch in its next tool call. Section 6 uses a safe unconditional click after its wait.
 
 ---
 
-## 0. Hard rules (breaking ANY of these breaks the run)
+## 1. Account boundary and login
 
-1. **Issue the monitor as ONE batch that waits AND clicks.** Never do `wait` in one call, think, then `click` in another call — the 24-second check window will expire. Always use the batch form in Section 5. The whole wait→click happens inside a single agent_browser invocation so there is **zero model reaction time**.
-2. **Never jump the video with JS and never call `.click()` from JS.** The site detects scripted clicks and flags "missed check / abnormal study". The ONLY allowed JS is (a) setting `playbackRate = 2`, (b) the read-only diagnostics, (c) read-only extraction of counters. Everything else is a **real browser `click`**.
-3. **Never switch lessons from the playlist on the right side of the player page** — that confuses `lessonId`, the video plays but is NOT counted. Always enter a lesson from the overview page's 学 button.
-4. **Never skip a lesson because it showed "错过了所有互动检测".** The video is not counted until you RE-WATCH it and pass a check (see Section 7). Skips are forbidden.
-5. **Don't trust memory for counts.** Re-read the overview counters before choosing a lesson and after every lesson. For a long run, also keep the progress file updated (Section 8).
-6. **Keep ONE browser tab.** When the lesson page loads or after a page transition, delete every tab except the one you are using (see Section 4.4).
-7. Everything below is a fixed sequence. Run it serially. Prefer exact selectors over guessing.
+### 1.1 Start the account
 
----
+For the first browser call of each new account, use a fresh managed browser session:
 
-## 1. Setup / login (fixed, write in stone)
-
-Open the login page:
-
-```
-{ "args": ["open", "https://www.ewt360.com/"] }
-```
-
-**1.1 Cookie consent (must be handled first if it appears).** If a dialog with `同意并继续` / `不同意` shows, click `同意并继续`:
-
-```
-{ "args": ["click", "xpath=//*[contains(text(),'同意并继续')]"] }
+```json
+{ "args": ["open", "https://www.ewt360.com/"], "sessionMode": "fresh" }
 ```
 
-**1.2 If the login form is already filled / you're logged in**, skip to 1.4. Check via `snapshot -i`: if a `退出登录` button exists you are logged in.
+Then inspect once:
 
-**1.3 Standard account login** (all accounts use these fixed selectors):
-1. Fill account:
-   ```
-   { "semanticAction": { "action": "fill", "locator": "placeholder", "value": "请输入学校提供的账号/手机号/邮箱", "text": "<ACCOUNT>" } }
-   ```
-2. Fill password:
-   ```
-   { "semanticAction": { "action": "fill", "locator": "placeholder", "value": "请输入密码", "text": "<PASSWORD>" } }
-   ```
-3. Submit:
-   ```
-   { "semanticAction": { "action": "click", "locator": "role", "value": "button", "name": "登 录" } }
-   ```
-4. Wait for the SPA to switch to the logged-in state (look for the 我的任务 link — it only exists when logged in and is exactly what Section 2 needs next):
-   ```
-   { "args": ["wait", "--fn", "(() => !!document.querySelector('a[href*=\"#/student/homework\"]'))()", "--timeout", "30000"] }
-   ```
-   If it times out, take a `snapshot -i`: a `退出登录` button also means you are logged in (then proceed to 2 directly); if a wrong-password / account message is shown, stop and ask the user to verify the credentials; if consent popped up again, accept it and retry the login button once, then re-wait.
-
-**1.4 Verify** you are logged in (`退出登录` visible) before continuing.
-
-> Credential handling: the account/password come from the user or saved config. Never invent credentials. If the user only gave credentials in chat, use them; otherwise ask for them first.
-
----
-
-## 2. Discover the current task (generic — never hardcode homeworkId)
-
-The task URL ends in `#/holiday/student-task-overview?homeworkId=NNN`. To find `NNN` for THIS account:
-
-1. On the logged-in homepage, click the **我的任务** link (its href contains `#/student/homework`):
-   ```
-   { "args": ["click", "xpath=//a[contains(@href,'#/student/homework')]"] }
-   ```
-   or just open it directly:
-   ```
-   { "args": ["open", "https://teacher.ewt360.com/ewtbend/bend/index/index.html#/student/homework"] }
-   ```
-2. Clear item-type filters so ALL tasks show. Click the **全部** button:
-   ```
-   { "args": ["click", "xpath=//button[.='全部'][1]"] }
-   ```
-3. Open the **current task** = the FIRST task card's 查看详情 (tasks are ordered with the most recent first, and this is the task you must finish):
-   ```
-   { "args": ["click", "xpath=//span[.='查看详情'][1]"] }
-   ```
-4. Confirm you landed on the overview:
-   ```
-   { "args": ["get", "url"] }
-   ```
-   Expected: `.../index.html#/holiday/student-task-overview?homeworkId=<id>`. Remember this URL as `OVERVIEW_URL` for the whole run.
-
-> If there is no 查看详情 yet (task list still loading), re-run a `wait --load networkidle` then step 3.
-
----
-
-## 3. Understand the overview page (verified DOM map)
-
-- The **subject tabs** are plain `<li>` whose text is `"<学科> 完成X/Y"` (e.g. `语文 完成31/35`). Clicking one expands that subject's lesson list.
-- Each **lesson** is an `<li class="taskItem-...">` (class always starts with `taskItem`). Inside it, three buttons:
-  - `导` (guide) — has no `data-type`,
-  - `学` (the video) — `div[data-type="2"]` ← **this is the one we click**,
-  - `练` (exercise) — `div[data-type="1"]`.
-- A lesson is incomplete when its text does NOT contain `已学完`; already-completed ones say `已学完`. Use the `X/Y` subject counter as the source of truth.
-- At the bottom of a long list there is a **加载更多** control (element class contains `loadMore`).
-
----
-
-## 4. Enter a lesson (fixed sequence)
-
-### 4.1 Open the overview
+```json
+{ "args": ["snapshot", "-i"] }
 ```
+
+If a separate popup named `同意并继续` is visible, click that visible ref first. This popup is different from the mandatory form checkbox below.
+
+If the login form is absent but `退出登录` is visible, do not assume the existing session is the requested account. Click the visible `退出登录` control, reopen `https://www.ewt360.com/`, and wait for the login form.
+
+### 1.2 Fill credentials
+
+```json
+{ "semanticAction": { "action": "fill", "locator": "placeholder", "value": "请输入学校提供的账号/手机号/邮箱", "text": "<ACCOUNT>" } }
+```
+
+```json
+{ "semanticAction": { "action": "fill", "locator": "placeholder", "value": "请输入密码", "text": "<PASSWORD>" } }
+```
+
+### 1.3 Mandatory agreement — always before 登录
+
+Use native `check`, which is idempotent and dispatches a real browser input action:
+
+```json
+{ "args": ["check", ".privacy__agreement input[type='checkbox']"] }
+```
+
+Read-only verification:
+
+```json
+{ "args": ["eval", "--stdin"], "stdin": "(() => ({ agreed: document.querySelector('.privacy__agreement input[type=checkbox]')?.checked === true, autoLogin: document.querySelector('#login__password_autoLogin')?.checked === true }))()" }
+```
+
+Proceed only when `agreed: true`. `autoLogin` is unrelated and may be either value.
+
+Now click login:
+
+```json
+{ "args": ["click", "#login__password button[type='submit']"] }
+```
+
+Wait up to 60 seconds for the logged-in state:
+
+```json
+{ "args": ["wait", "--fn", "(() => document.body.innerText.includes('退出登录') || !!document.querySelector('a[href*=\"#/student/homework\"]'))()", "--timeout", "60000"] }
+```
+
+If this wait times out, run one read-only diagnostic. If it reports `logged: true`, continue; otherwise report the visible error rather than repeatedly submitting credentials:
+
+```json
+{ "args": ["eval", "--stdin"], "stdin": "(() => ({ logged: document.body.innerText.includes('退出登录'), loginVisible: !!document.querySelector('#login__password_userName')?.offsetParent, messages: [...document.querySelectorAll('[role=alert],.ant-message-notice,.ant-form-item-explain-error,.ant-modal')].filter(e => e.offsetParent !== null).map(e => (e.innerText||'').replace(/\\s+/g,' ').trim()).filter(Boolean) }))()" }
+```
+
+Never put credentials into a repository file, progress file, screenshot name, session name, or final report.
+
+---
+
+## 2. Discover this account's current task
+
+Open the fixed task-list route directly:
+
+```json
+{ "args": ["open", "https://teacher.ewt360.com/ewtbend/bend/index/index.html#/student/homework"] }
+```
+
+Wait for task cards:
+
+```json
+{ "args": ["wait", "--fn", "(() => document.body.innerText.includes('查看详情'))()", "--timeout", "30000"] }
+```
+
+The page currently has two `全部` buttons: subject filter first, type filter second. Click both so an old filter cannot hide the current task:
+
+```json
+{ "args": ["click", "xpath=(//button[normalize-space(.)='全部'])[1]"] }
+```
+
+```json
+{ "args": ["click", "xpath=(//button[normalize-space(.)='全部'])[2]"] }
+```
+
+Open the first/current task card:
+
+```json
+{ "args": ["click", "xpath=(//span[normalize-space(.)='查看详情'])[1]"] }
+```
+
+Wait for the overview URL:
+
+```json
+{ "args": ["wait", "--url", "**/holiday/student-task-overview?homeworkId=*", "--timeout", "30000"] }
+```
+
+```json
+{ "args": ["get", "url"] }
+```
+
+The returned URL is this account's runtime-only `OVERVIEW_URL`. Never save it to disk and never carry it into the next account.
+
+---
+
+## 3. Read live counters
+
+Wait for subject counters:
+
+```json
+{ "args": ["wait", "--fn", "(() => [...document.querySelectorAll('li')].some(e => /完成\\s*\\d+\\/\\d+/.test(e.innerText||'')))()", "--timeout", "30000"] }
+```
+
+Read them:
+
+```json
+{ "args": ["eval", "--stdin"], "stdin": "(() => [...document.querySelectorAll('li')].map(e => (e.innerText||'').replace(/\\s+/g,' ').trim()).filter(t => /完成\\s*\\d+\\/\\d+/.test(t)).slice(0,10))()" }
+```
+
+Immediately before entering a lesson, remember only in the current conversation:
+
+- requested account (masked if reported),
+- `OVERVIEW_URL`,
+- requested subject,
+- subject counter `BEFORE = X/Y`,
+- chosen exact title.
+
+Do not persist these values to a file.
+
+---
+
+## 4. Exhaustively load the requested subject — mandatory
+
+### 4.1 Open overview and subject
+
+```json
 { "args": ["open", "<OVERVIEW_URL>"] }
+```
+
+```json
 { "args": ["wait", "--load", "domcontentloaded"] }
 ```
 
-### 4.2 Open the subject tab
+```json
+{ "args": ["click", "xpath=//li[contains(.,'<SUBJECT>') and contains(.,'完成')]"] }
 ```
-{ "args": ["click", "xpath=//li[contains(.,'<学科>') and contains(.,'完成')]"] }
-```
-- If the click reports *"outside nested scroll container / use scrollintoview"*, run first:
-  ```
-  { "args": ["scrollintoview", "xpath=//li[contains(.,'<学科>') and contains(.,'完成')]"] }
-  ```
-  then repeat the click.
-- If the target lesson is missing because the list is truncated, click the load-more control:
-  ```
-  { "args": ["click", "xpath=//*[contains(text(),'加载更多') or contains(text(),'点击加载更多')]"] }
-  ```
-  (no-op is fine when it says `没有更多必学任务了`).
 
-### 4.3 Click the lesson's 学 button (use the EXACT title from the page; it must be unique)
-```
-{ "args": ["scrollintoview", "xpath=//li[contains(@class,'taskItem') and contains(.,'<exact title>')]//div[@data-type='2']"] }
-{ "args": ["click", "xpath=//li[contains(@class,'taskItem') and contains(.,'<exact title>')]//div[@data-type='2']"] }
-```
-- "Element not found" usually means the list wasn't expanded/loaded yet → redo 4.2 (+ load-more), then retry.
+If that click reports a nested-scroll error, run `scrollintoview` on exactly the same XPath and click again.
 
-### 4.4 Close every other tab (hardcoded rule)
-Entering a lesson opens a NEW tab and leaves the overview behind. Keep exactly one tab:
+Wait until rows or a terminal load marker exists:
+
+```json
+{ "args": ["wait", "--fn", "(() => document.querySelectorAll('li[class*=taskItem]').length > 0 || document.body.innerText.includes('没有更多必学任务了'))()", "--timeout", "30000"] }
 ```
+
+### 4.2 Mandatory load-more loop
+
+Read the list state:
+
+```json
+{ "args": ["eval", "--stdin"], "stdin": "(() => { const visible = e => e.offsetParent !== null; const leaves = [...document.querySelectorAll('*')].filter(e => visible(e) && e.children.length === 0).map(e => (e.innerText||'').trim()); const rows = [...document.querySelectorAll('li[class*=taskItem]')].filter(visible); return { rowCount: rows.length, loadState: leaves.includes('点击加载更多') || leaves.includes('加载更多') ? 'MORE' : leaves.includes('没有更多必学任务了') ? 'DONE' : 'MISSING' }; })()" }
+```
+
+Branch exactly:
+
+- `MORE`: note `OLD_ROW_COUNT`, click the exact leaf control below, wait for either a larger row count or terminal text, then run the state read again.
+- `DONE`: only now continue to Section 4.3.
+- `MISSING`: wait once for the known control state, read again, and if still missing take one snapshot and stop selection. **Never interpret MISSING as DONE.**
+
+Exact load-more click:
+
+```json
+{ "args": ["click", "xpath=//*[not(*) and (normalize-space(.)='点击加载更多' or normalize-space(.)='加载更多')]"] }
+```
+
+After each click:
+
+```json
+{ "args": ["wait", "--fn", "(() => document.querySelectorAll('li[class*=taskItem]').length > <OLD_ROW_COUNT> || document.body.innerText.includes('没有更多必学任务了'))()", "--timeout", "15000"] }
+```
+
+Repeat the state-read → click → wait cycle until the returned value is explicitly `loadState: 'DONE'`. On the verified page, a long 语文 list changed from 30 rows to 35 rows after this required click.
+
+### 4.3 Extract only incomplete video lessons
+
+Run this only after `DONE`:
+
+```json
+{ "args": ["eval", "--stdin"], "stdin": "(() => [...document.querySelectorAll('li[class*=taskItem]')].filter(e => e.offsetParent !== null && e.querySelector('div[data-type=\"2\"]') && !(e.innerText||'').includes('已学完')).map(e => { const text=(e.innerText||'').replace(/\\s+/g,' ').trim(); const m=text.match(/^\\S+\\s+(.+?)\\s+视频\\s+(\\d+)分钟/); return { title:m?.[1]||text, minutes:m?Number(m[2]):9999, text }; }).sort((a,b)=>a.minutes-b.minutes || a.title.localeCompare(b.title)))()" }
+```
+
+Choose the first/shortest item unless the user named a lesson. Rows without `div[data-type='2']` are tests, not videos, and must not be selected.
+
+---
+
+## 5. Enter one lesson and enforce one-tab state
+
+### 5.1 Pre-click cleanup: preserve the active overview
+
+Run:
+
+```json
 { "args": ["tab", "list"] }
 ```
-For each tab that is NOT the active one, close it:
+
+The active line starts with `*`. Confirm that active URL is `OVERVIEW_URL`. If extra tabs exist, close **one non-active id at a time**:
+
+```json
+{ "args": ["tab", "close", "<NON_ACTIVE_TAB_ID>"] }
 ```
-{ "args": ["tab", "close", "<tN>"] }
+
+Regardless of whether that call says success or `Tab ... not found`, immediately run:
+
+```json
+{ "args": ["tab", "list"] }
 ```
-The "not found" error after closing is normal (ids renumber) — just run `tab list` again and repeat until only one tab remains. Then re-verify the page:
+
+Judge only the new list:
+
+- closed id absent → close succeeded; do not retry that id,
+- closed id still present → confirm overview is active, then retry once,
+- repeat until exactly one active overview tab remains.
+
+**Do not use `batch --bail` for tab cleanup.** A verified run showed `tab close t1` and `tab close t2` each returned “not found” even though the following list proved each tab had been removed.
+
+### 5.2 Click 学 from the overview
+
+```json
+{ "args": ["scrollintoview", "xpath=//li[contains(@class,'taskItem') and contains(.,'<EXACT_TITLE>')]//div[@data-type='2']"] }
 ```
+
+```json
+{ "args": ["click", "xpath=//li[contains(@class,'taskItem') and contains(.,'<EXACT_TITLE>')]//div[@data-type='2']"] }
+```
+
+Wait for the newly active player tab:
+
+```json
+{ "args": ["wait", "--fn", "(() => location.hash.includes('/homework/play-videos') && /lessonId=\\d+/.test(location.hash))()", "--timeout", "30000"] }
+```
+
+### 5.3 Post-click cleanup: preserve the active player
+
+Run `tab list`. Confirm the `*` active URL contains both `/homework/play-videos` and `lessonId=`. Close one non-active tab, then list again, using the exact loop from Section 5.1 until only the player remains.
+
+Finally:
+
+```json
 { "args": ["get", "url"] }
 ```
-It must still end with `...#/homework/play-videos?...lessonId=<id>...`.
 
-### 4.5 Wait for the video element, then start it at 2x
-Video ready (single `wait`):
-```
-{ "args": ["wait", "--fn", "(() => { const v = document.querySelector('video'); return v && v.readyState > 0; })()", "--timeout", "30000"] }
-```
-Start at 2x and confirm state (this is the ONLY allowed playback script — equivalent to the player's 2x menu):
-```
-{ "args": ["eval", "--stdin"], "stdin": "(() => { const v = document.querySelector('video'); if (!v) return 'NOVID'; v.playbackRate = 2; v.play(); return {id: location.hash.match(/lessonId=(\\d+)/)?.[1], t: Math.round(v.currentTime), d: Math.round(v.duration), rate: v.playbackRate, paused: v.paused}; })()" }
-```
-Good = `id` is this lesson's id, `d` matches the listed minutes, `rate: 2`, `paused: false`, and `t` grows.
+If the final URL is not the player URL, recover with `tab list`, select the player via `tab <PLAYER_TAB_ID>`, and verify again. Do not start playback on an unverified tab.
 
 ---
 
-## 5. Playback monitor — ONE batch = wait AND click (no model reaction)
+## 6. Start and monitor playback
 
-Never split this into two calls. Output the whole batch as a single tool call. The `wait` step blocks until the page state changes; the `click` step runs in the SAME invocation the instant a check popup appears. If no popup is up, the click fails benignly and you read the wait's result.
+### 6.1 Start at 2x
 
-**Timeout formula (in ms):** `(duration - currentTime) / 2 + 60` seconds, i.e. `((d - t) / 2 + 60) * 1000`. `d` and `t` come from Section 4.5 — recompute after every loop.
-
-```
-{ "args": ["batch"],
-  "stdin": "[[\"wait\",\"--fn\",\"(() => { const d = document.querySelector('[class*=earnest_check]'); if (d && d.offsetParent !== null) return 'CHECK'; const v = document.querySelector('video'); if (!v) return 'GONE'; if (v.currentTime >= v.duration - 3) return 'END'; return false; })()\",\"--timeout\",\"<((d - t) / 2 + 60) * 1000>\"],[\"click\",\"[class*=earnest_check] .btn-DOCWn\"]]" }
+```json
+{ "args": ["wait", "--fn", "(() => { const v=document.querySelector('video'); return !!(v && v.readyState > 0); })()", "--timeout", "30000"] }
 ```
 
-Read `details.batchSteps[0]` (the wait step) and branch:
-
-| wait result | Meaning | What to do |
-|---|---|---|
-| `CHECK` | A seriousness-check popup appeared | The batch's step-2 click already dismissed it (if step 2 succeeded, fine). Loop back to Section 5 with a fresh timeout. |
-| `END` | Video finished (`t >= d - 3`) | Step-2 click failed with "Element not found" — that is **expected and benign**. Go to Section 6 (verify). |
-| `GONE` | video element disappeared (page crashed/refreshed) | Re-enter this lesson from Section 4 (overview → 学). |
-| `waited: timeout` / no CHECK/END/GONE | Video stalled (decoding can't keep up at 2x, or a popup was left open) | Run the diagnostic in Section 5.1, then loop back. |
-
-> A batch whose step 2 fails is a NORMAL result — `isError` on the tool does NOT mean a real error. Only step 1's result decides the branch.
-
-### 5.0 WEAK-MODEL & TOOL-ARG NOTE (read before issuing the batch)
-The `batch` tool's `stdin` field MUST be a single flat **string** whose content is the JSON text of the array. It starts with `[["wait"` and ends with `]]`. Do NOT pass a nested array/object, do NOT pretty-print/indent it, do NOT wrap the quotes twice. If the validation error's first line says `stdin: must be string` or `could not be parsed as JSON`, retry ONCE with the exact flat string from the code block above, copied verbatim, changing ONLY the timeout number.
-
-### 5.0b MANDATORY FALLBACK (if the batch still fails, never stall)
-1. Run one wait: `{ "args": ["wait", "--fn", "(() => { const d = document.querySelector('[class*=earnest_check]'); if (d && d.offsetParent !== null) return 'CHECK'; const v = document.querySelector('video'); if (!v) return 'GONE'; if (v.currentTime >= v.duration - 3) return 'END'; return false; })()", "--timeout", "<((d - t) / 2 + 60) * 1000>"] }`
-2. Read the wait result. `CHECK` → the VERY next tool call (nothing else in between) is `{ "args": ["click", "[class*=earnest_check] .btn-DOCWn"] }`. `END` → Section 6. `GONE` → re-enter (Section 4). Timeout → Section 5.1, then loop.
-This keeps the 24 s check window safe: the click is the immediate next call — no snapshots, no analysis, no extra reads between wait and click.
-
-### 5.1 Stall diagnostic (only on a timeout)
+```json
+{ "args": ["eval", "--stdin"], "stdin": "(() => { const v=document.querySelector('video'); if(!v) return 'NOVID'; v.playbackRate=2; v.play(); return { id:location.hash.match(/lessonId=(\\d+)/)?.[1], t:Math.round(v.currentTime), d:Math.round(v.duration), rate:v.playbackRate, paused:v.paused }; })()" }
 ```
-{ "args": ["eval", "--stdin"], "stdin": "(() => { const v = document.querySelector('video'); const d = document.querySelector('[class*=earnest_check]'); return { t: v ? Math.round(v.currentTime) : -1, dur: v ? Math.round(v.duration) : -1, p: v ? v.paused : null, dlg: d ? ((d.innerText||'').replace(/\\s+/g,' ').trim().slice(0,60)) : 'NONE' }; })()" }
+
+Good state: correct lesson id, finite duration, `rate: 2`, `paused: false`.
+
+### 6.2 Monitor with one static batch
+
+Compute `TIMEOUT_MS = Math.round(((d - t) / 2 + 60) * 1000)`.
+
+Issue this exact raw batch. Top-level `stdin` must be a **string**, beginning with `[["wait"` and ending with `]]`:
+
+```json
+{ "args": ["batch"], "stdin": "[[\"wait\",\"--fn\",\"(() => { const d=document.querySelector('[class*=earnest_check]'); if(d && d.offsetParent!==null){ const s=(d.innerText||'').replace(/\\s+/g,' '); return s.includes('错过了本节课所有的互动检测') ? 'MISSED' : 'CHECK'; } const v=document.querySelector('video'); if(!v) return 'GONE'; if(v.currentTime>=v.duration-3) return 'END'; return false; })()\",\"--timeout\",\"<TIMEOUT_MS>\"],[\"click\",\"[class*=earnest_check] .btn-DOCWn\"]]" }
 ```
-- `p: true` and a dialog → click it (`[class*=earnest_check] .btn-DOCWn`, single call).
-- `p: true` and no dialog → resume: `{ "args": ["eval", "--stdin"], "stdin": "(() => { const v = document.querySelector('video'); if (v && v.paused) v.play(); })()" }` (playbackRate stays 2).
-- `p: false` but `t` not advancing → decoder can't keep 2x: `{ "args": ["eval", "--stdin"], "stdin": "(() => { const v = document.querySelector('video'); if (v) v.playbackRate = 1; })()" }`.
-- Then loop back to Section 5.
 
----
+This is not conditional branching. It works because the second command is always safe to attempt:
 
-## 6. Verify the lesson counted (every lesson — mandatory)
+- after `CHECK`/`MISSED`, it dismisses the visible dialog,
+- after `END`, there is no dialog and the click fails benignly.
 
-1. Reopen the overview (one call), read counters (one call):
-```
-{ "args": ["open", "<OVERVIEW_URL>"] }
-```
-```
-{ "args": ["eval", "--stdin"], "stdin": "(() => { return [...document.querySelectorAll('li')].map(e => e.innerText.replace(/\\s+/g,' ').trim()).filter(t => t.includes('完成') && t.includes('/')).slice(0, 8).join(' || '); })()" }
-```
-Output looks like `语文 完成31/35 || 数学 完成27/27 || ...`.
+Read **only `details.batchSteps[0]`** to choose the next state:
 
-2. **Success** = the subject's counter incremented by 1 vs. the previous read (e.g. `5/29 → 6/29`). Update the progress file (Section 8) and start the next lesson from Section 4.
-
-3. **Failure** (counter unchanged) — do NOT move on. Cause is one of:
-   - You entered from the player-page right-side list instead of the overview 学 button → redo correctly,
-   - or a check was missed → **rewatch** (Section 7).
-
----
-
-## 7. Rewatch when a check was missed — NEVER skip (hardcoded)
-
-Trigger: you see a popup whose text contains `你错过了本节课所有的互动检测` / `missed all checks`, **or** the counter did not +1 after END. Until this lesson is counted, it is not done.
-
-1. Dismiss popup (same button, both messages — "点击通过检查" or "我知道了" use `.btn-DOCWn`):
-   ```
-   { "args": ["click", "[class*=earnest_check] .btn-DOCWn"] }
-   ```
-2. Re-enter the SAME lesson from the overview (Section 4.3): open overview → expand subject → click that lesson's `学` button. The video restarts from 0 and checks will re-trigger.
-3. Run Section 4.5 (2x) then Section 5 batches, catching EVERY `CHECK` immediately.
-4. On `END`, verify with Section 6. If it STILL didn't +1, rewatch once more.
-5. If two rewatch attempts both fail, report it instead of silently skipping the lesson.
-
----
-
-## 8. Long runs & low context (short-memory safety)
-
-This is a long task and the model may forget where it is. Mitigate with a **progress ledger file**:
-
-1. At the start of the run, read `ewt360-progress.md` in the working directory (create it if missing):
-   - account, `OVERVIEW_URL` / homeworkId,
-   - the last subject counters you observed (e.g. `生物 5/29`),
-   - the lesson currently in progress,
-   - state: `idle | playing | verifying | rewatching`.
-2. After EVERY lesson verify (Section 6) update the file with the new counters and `state: idle`, and note the next unfinished lesson to pick.
-3. Each time you begin Section 4 for a new lesson, you MUST re-read the ledger line and the live counters (never from memory) before acting.
-4. Keep writes tiny (one small `write` per lesson). Never dump page HTML into the ledger.
-
-If the session is interrupted, the ledger lets the next run resume from where playback stopped without re-watching done lessons.
-
----
-
-## 9. Common pitfalls (cheat sheet)
-
-| Symptom | Cause / fix |
+| Wait result | Next action |
 |---|---|
-| Batch step 2 "Element not found" | Expected when video ENDed (no popup) — ignore, branch on step 1. |
-| Batch validation error (`stdin: must be string` / `not valid JSON`) | You passed the stdin as an array or pretty-printed string — retry once with the EXACT flat string form (Section 5.0), then fall back to sequential wait→click (Section 5.0b). |
-| Click on subject/lesson fails with "outside nested scroll container" | Run `scrollintoview` on the same selector, then click again. |
-| "Element not found" for a lesson | List not expanded/loaded → open subject tab, click 加载更多, retry. |
-| Clicking the right-side player playlist | Forbidden — it breaks counting. Always go back to overview 学 button. |
-| wait times out, not GONE | Stalled: run Section 5.1, resume/1x, continue. |
-| Popup "错过了所有的互动检测" | Rewatch the lesson (Section 7). Never skip. |
-| Count unchanged after END | Missed checks or wrong entry path → Section 7 rewatch / correct path. |
-| Multiple tabs / wrong page | Section 4.4 — `tab list`, close extras, `get url`. |
-| After closing tabs "active page unverified" | Run `get url` once to re-verify, then continue. |
-| Long session name socket error | Use an explicit short session: add `` `--session ewt` `` tokens after `open`/first command. |
+| `CHECK` | The batch already clicked it. Re-read `{t,d}` and repeat Section 6.2. |
+| `MISSED` | The batch dismissed the missed-check notice. Rewatch the same lesson from Section 4. |
+| `END` | Ignore the expected step-2 click error. Go to Section 7. |
+| `GONE` | Re-enter the same lesson from Section 4. |
+| timeout | Run Section 6.3, then monitor again. |
+
+If the model cannot encode batch `stdin` as a string, retry it once only. Then use the mandatory fallback: run the same wait alone; if it returns `CHECK`, the immediate next tool call must be the real click below, with no snapshot or analysis in between:
+
+```json
+{ "args": ["click", "[class*=earnest_check] .btn-DOCWn"] }
+```
+
+### 6.3 Timeout diagnostic
+
+```json
+{ "args": ["eval", "--stdin"], "stdin": "(() => { const v=document.querySelector('video'); const d=document.querySelector('[class*=earnest_check]'); return { t:v?Math.round(v.currentTime):-1, dur:v?Math.round(v.duration):-1, paused:v?.paused ?? null, rate:v?.playbackRate ?? null, dialog:d&&d.offsetParent!==null?(d.innerText||'').replace(/\\s+/g,' ').trim().slice(0,100):'NONE' }; })()" }
+```
+
+- paused + dialog: real-click `[class*=earnest_check] .btn-DOCWn` immediately,
+- paused + no dialog: use the allowed player-state eval `v.play()`,
+- playing but time does not advance: set `playbackRate=1`, resume, and monitor,
+- video missing: re-enter from overview.
 
 ---
 
-## 10. Windows / PowerShell notes (conversion of the original Termux manual)
+## 7. Verify and continue
 
-This skill was ported from a Termux CLI manual to Windows. In pi you DO NOT type these into PowerShell. All commands are sent through the native `agent_browser` tool:
+Open `OVERVIEW_URL`, wait for counters, and run the counter extraction from Section 3.
 
-- CLI tokens go in `args` as separate array items — e.g. `["click","xpath=//li[contains(.,'语文') and contains(.,'完成')]"]`.
-- JavaScript goes in the top-level `stdin` field, never appended to `args`. Because the JS lives in `stdin`, PowerShell's `$`, backticks, quotes, and the `[` `]` in xpath selectors never touch a shell parser, so no escaping bugs occur.
-- Keep every snippet a single self-invoked function `(() => { ... })()` returning a value; avoid double quotes inside JS (use single quotes) so the token stays clean.
-- **Only if you ever run the raw `agent-browser.exe` in a PowerShell console**: quote the whole `--fn`/eval expression in double quotes and replace inner `"` with single quotes; or pipe a `@'...'@` here-string into `eval --stdin`. This is optional; the native tool path above is the correct one.
+For the requested subject:
+
+- `AFTER = BEFORE + 1`: success. Do not write a file. Start the next lesson by re-reading the live counter and rerunning the complete Section 4 load-more gate.
+- counter unchanged: rewatch the same exact lesson. Always enter again from the overview `学` button. Allow at most two rewatch attempts, then report the blocker.
+- counter changed unexpectedly or account/task identity is uncertain: stop; rediscover this account's task rather than guessing.
+
+When the subject reaches `Y/Y`, stop that subject. For another account, start again at Section 1 and discard every runtime value from this account.
 
 ---
 
-## 11. Ref checksums / selectors verified on a live account (2026-08)
+## 8. Fixed recovery table
 
-- Login fields: placeholders `请输入学校提供的账号/手机号/邮箱`, `请输入密码`; button `登 录`; consent `同意并继续`.
-- Task entry: `我的任务` link → `#/student/homework` → `全部` → first `查看详情`.
-- Overview subject: `//li[contains(.,'<学科>') and contains(.,'完成')]`.
-- Lesson row: `li[class*=taskItem]`; 学 button `div[data-type='2']`; 导 has no data-type; 练 `data-type='1'`. Completed rows contain `已学完`.
-- Video: `document.querySelector('video')`; check popup `[class*=earnest_check] .btn-DOCWn`; player URL has `lessonId=<id>`.
-- Works at 2x end-to-end; counters increment after END (verified: a 生物 lesson went `5/29 → 6/29 → 7/29` across test runs).
-- **Weak-model validation (meta/muse-glimmer-30b via ltzy relay, 2026-08):** ran the complete flow autonomously — login, task discovery, lesson entry, 2x, tab cleanup, monitoring, verify. It could NOT emit the batch `stdin` JSON string (repeatedly passed an array → `stdin: must be string`), but the Section 5.0b fallback (wait → immediate click) handled every CHECK and the lesson COUNTED: 生物 7/29 → 8/29 (染色体变异, lessonId=66548). Conclusion: for weak models, expect the fallback path to be used; the batch remains best for stronger models.
+| Symptom | Required response |
+|---|---|
+| `tab close tN` says not found | Immediately `tab list`; if tN is absent, it succeeded. Never retry an absent id. |
+| Batch tab cleanup stops on first close | Do not batch closes. List → close one → list. |
+| Lesson list shows `点击加载更多` | Click it and wait for more rows/terminal text. Selection is forbidden. |
+| Load state is `MISSING` | Wait/read again; snapshot once if still missing. Never treat as complete. |
+| Lesson not found | Reopen subject, finish the load-more loop to `DONE`, extract again. |
+| Player URL wrong | `tab list`, select the active player id, `get url`; never use right-side playlist. |
+| Monitor batch step 2 fails after `END` | Expected; branch only on batch step 1. |
+| Counter unchanged | Rewatch same lesson from overview; never skip. |
+| New account starts | Fresh login, fresh task discovery, no shared file or previous values. |
+
+---
+
+## 9. Live selector checks (verified 2026-08)
+
+- Login account: `#login__password_userName` / placeholder `请输入学校提供的账号/手机号/邮箱`
+- Login password: `#login__password_password` / placeholder `请输入密码`
+- Mandatory agreement: `.privacy__agreement input[type='checkbox']`
+- Unrelated auto-login: `#login__password_autoLogin`
+- Submit: `#login__password button[type='submit']`
+- Task filters: first and second `button` whose exact text is `全部`
+- Task detail: first exact `查看详情`
+- Subject: `//li[contains(.,'<SUBJECT>') and contains(.,'完成')]`
+- Lesson row: `li[class*=taskItem]`
+- 学 button: `div[data-type='2']`
+- Load more: exact leaf text `点击加载更多` or `加载更多`
+- Load terminal: exact text `没有更多必学任务了`
+- Player: `video`; URL contains `/homework/play-videos` and `lessonId=`
+- Seriousness dialog button: `[class*=earnest_check] .btn-DOCWn`
+
+Small-flow verification on a live 语文 task confirmed: mandatory agreement selector checked before login; task discovery reached homeworkId `10493931`; 语文 showed 30 rows plus `点击加载更多`, then 35 rows plus `没有更多必学任务了`; lesson `T文言文实词课内现汉推断法` opened the correct player with lessonId `116414`; and tab-close false-negative responses still removed the stale tabs as proved by subsequent `tab list` calls.

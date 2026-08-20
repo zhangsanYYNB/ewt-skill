@@ -4,8 +4,8 @@
 *.jsonl
 pi-*.json
 
-# 进度台账保留（可自行删除以重置）
-# ewt360-progress.md
+# 本地旧版进度台账：新版 skill 禁止使用，避免多账户串号
+/ewt360-progress.md
 
 # 编辑器
 .vscode/

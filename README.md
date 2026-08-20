@@ -19,8 +19,7 @@ ewt-skill/
 │   │   └── SKILL.md
 │   └── ewt360-lessons-mini/     精简 skill（弱模型 / 8-32K 小上下文专用）
 │       └── SKILL.md
-├── ewt360-progress.md           运行进度台账（防短上下文失忆，可删除重建）
-└── ewt360-看课自动化操作手册.md 原 Termux 操作手册
+└── ewt360-看课自动化操作手册.md 原 Termux 操作手册（历史参考）
 ```
 
 ## 快速开始
@@ -29,7 +28,15 @@ ewt-skill/
    （Windows: `C:\Users\<你>\.pi\agent\skills\`），或运行时用 `--skill <路径>` 加载。
 2. **准备模型**：在 `~/.pi/agent/models.json` 注册 OpenAI 兼容供应商（见下方示例），
    或运行时用 `--provider/--model/--api-key` 传入。
-3. **跑流程**：按 `docs/运行流程提示词.md` 的 A/B/C 段注入提示词并运行。
+3. **跑流程**：加载 skill 后直接给账号、密码和目标学科。新版流程不读写共享进度文件，适合顺序执行多个账户。
+
+## 2026-08 修复要点
+
+- 登录前强制勾选 `.privacy__agreement input[type='checkbox']`，与“下次自动登录”区分。
+- 选课前强制重复点击“点击加载更多”，直到页面明确显示“没有更多必学任务了”。
+- 标签页清理由 `tab list → close 一个 → tab list 复核` 驱动；`tab close` 即使返回 not found，也以下一次列表为准。
+- 不再使用 `ewt360-progress.md`，避免多账户串号；进度和计数只读取当前账户的实时概览页。
+- `batch` 不能按上一步返回值条件分支；它只能顺序执行（`--bail` 只能失败停止）。监控 batch 使用安全的固定 wait+click，下一状态由模型读取 `details.batchSteps[0]` 后决定。
 
 ## 模型配置示例（models.json）
 
@@ -54,9 +61,9 @@ ewt-skill/
 ```powershell
 pi -p --mode json `
   --provider ltzy-muse --model "meta/muse-glimmer-30b" --api-key "<API_KEY>" `
-  --append-system-prompt "docs/recipe.txt" `
-  --tools "agent_browser,write" --no-skills `
-  "Execute the recipe now. First tool call: agent_browser args ['open','https://www.ewt360.com/']. Do not read anything. Report only when the recipe is complete."
+  --skill "skills/ewt360-lessons-mini/SKILL.md" `
+  --tools "agent_browser" `
+  "账号=<ACCOUNT>，密码=<PASSWORD>，学科=<SUBJECT>。按 mini skill 先测试一节，验证计数 +1；不要读写进度文件。"
 ```
 
 ## 实测记录（2026-08，账号已脱敏）
